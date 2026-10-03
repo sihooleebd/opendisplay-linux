@@ -1,7 +1,7 @@
 #pragma once
 
 #include "opendisplay/desktop_backend.hpp"
-#include "opendisplay/ffmpeg_encoder.hpp"
+#include "opendisplay/encoder.hpp"
 #include "opendisplay/pipewire_capture.hpp"
 #include "opendisplay/socket.hpp"
 #include "opendisplay/types.hpp"
@@ -47,13 +47,16 @@ private:
     void startPipeline(const PhoneInfo& phone);
     void stopPipeline();
     bool send(std::string_view payload);
+    /// Writes an already length-prefixed message, so the video path does not
+    /// rebuild and recopy each access unit just to add four bytes.
+    bool sendFramed(std::string_view framed);
     void queue(Event event);
 
     Options options_;
     Socket socket_;
     std::unique_ptr<DesktopBackend> desktop_;
     PipeWireCapture capture_;
-    FfmpegEncoder encoder_;
+    std::unique_ptr<Encoder> encoder_;
     std::thread receiver_;
     std::atomic_bool connected_ = false;
     std::mutex sendMutex_;

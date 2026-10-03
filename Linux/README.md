@@ -3,16 +3,23 @@
 This target connects the existing, unmodified iOS/iPadOS receiver to a KDE or
 Hyprland Wayland session. It discovers `_opensidecar._tcp` services with Avahi
 or opens the receiver's port through usbmuxd, captures with PipeWire, and
-streams Annex B H.264 produced by FFmpeg. The command-line client and an
-initial Kirigami control application share the same connection engine.
+streams Annex B H.264. On VA-API it encodes in-process through libavcodec and
+takes the compositor's frame as a DMA-BUF without copying it; NVENC and
+software encoding still run FFmpeg as a subprocess. The command-line client
+and an initial Kirigami control application share the same connection engine.
 
 ## Arch Linux dependencies
 
 ```sh
 sudo pacman -S --needed base-devel cmake qt6-base qt6-declarative qt6-wayland \
-  kirigami pipewire avahi libusbmuxd usbmuxd ffmpeg libkscreen wayland \
+  kirigami pipewire avahi libusbmuxd usbmuxd ffmpeg libdrm libkscreen wayland \
   xdg-desktop-portal xdg-desktop-portal-kde
 ```
+
+`ffmpeg` is both a build and a runtime dependency. The VA-API encoder links
+`libavcodec`, `libavfilter` and `libavutil`, and `libdrm` supplies the DMA-BUF
+format definitions; the `ffmpeg` binary is still invoked for the NVENC and
+`libx264` paths, so it must also stay on `PATH`.
 
 For Hyprland, also install `hyprland xdg-desktop-portal-hyprland`. The package
 keeps the KDE dependencies so one binary can select either backend.
@@ -94,6 +101,7 @@ desktop's capture permission dialog. Other useful forms are:
 ./build/linux/opendisplay-linux --encoder vaapi --vaapi-device /dev/dri/renderD128
 ./build/linux/opendisplay-linux --encoder nvenc --mode mirror --no-input
 ./build/linux/opendisplay-linux --compositor hyprland --reference-monitor eDP-1
+./build/linux/opendisplay-linux --no-zero-copy --verbose
 ```
 
 ### Virtual monitor layout
@@ -128,8 +136,16 @@ opendisplay-linux --reference-resolution 3840x2160 --reference-scale 1.5 \
 opendisplay-linux --reference-geometry 2560x1440+0+0
 ```
 
-`--scale` remains the video encoder resolution multiplier and does not change
-desktop display scaling. KDE custom virtual modes require Plasma/libkscreen
+`--scale` is the video encoder resolution multiplier and does not change
+desktop display scaling. It multiplies the resolution the compositor actually
+captures, not the receiver's panel size. At the default of `1.0` the encoder
+therefore matches the captured frame exactly and the GPU only converts colour,
+with no scaling pass: a virtual output nudged to produce integer logical
+geometry rarely lands on the receiver's native pixels, and resampling every
+frame to cover that handful of pixels costs a filter pass and visibly softens
+text. The receiver's own display scaler closes the gap for nothing. Lowering
+it (`--scale 0.8`) is the lever for trading resolution against latency, since
+it shrinks both the colour conversion and the encode. KDE custom virtual modes require Plasma/libkscreen
 6.6 or newer. OpenDisplay uses libkscreen in-process so output identity and
 detailed configuration errors remain reliable while KDE adds or renumbers
 outputs.
@@ -161,6 +177,36 @@ opendisplay-linux --transport wifi --host 192.168.1.40 --port 9000
 ```
 
 `--encoder auto` prefers VA-API, then NVENC, and falls back to `libx264`.
+
+### Zero-copy capture
+
+With VA-API, OpenDisplay asks PipeWire for the compositor's frame as a DMA-BUF
+and imports it directly into a VA-API surface, then converts and encodes it
+in-process. Nothing touches system memory on the way: the frame is never
+copied out of the GPU, never written through a pipe, and never uploaded back.
+
+The pieces degrade independently, so there is always a working path:
+
+- A compositor that will not share GPU buffers negotiates system memory
+  instead, and the in-process encoder uploads each frame.
+- A machine where a VA-API device cannot be opened falls back to the FFmpeg
+  subprocess, as do `--encoder nvenc` and `--encoder software`, neither of
+  which can accept a GPU buffer through a pipe.
+
+`--no-zero-copy` forces frames through system memory. `--verbose` reports
+which path was negotiated and breaks the encode down per stage every few
+seconds, which is the quickest way to see where latency is going:
+
+```
+PipeWire format: 2380x1666 BGRA @ 0/1 fps, GPU buffers (zero copy)
+Encoding 2380x1666 to 2380x1666 (convert only, no rescale)
+Encoder stages (ms over 41 frames): surface p50 0.0 p95 0.1, convert p50 1.9 \
+p95 5.4, encode p50 5.3 p95 9.1
+```
+
+`surface` is acquiring the frame -- importing a DMA-BUF, or uploading a copy;
+`convert` is the GPU colour conversion to NV12; `encode` is H.264 itself.
+
 Use `Linux/tools/fake_receiver.py` to exercise the TCP framing without an iOS
 device; it does not decode video or advertise Bonjour.
 

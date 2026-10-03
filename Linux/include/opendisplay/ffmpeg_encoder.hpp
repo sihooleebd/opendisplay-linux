@@ -1,5 +1,6 @@
 #pragma once
 
+#include "opendisplay/encoder.hpp"
 #include "opendisplay/types.hpp"
 
 #include <atomic>
@@ -15,33 +16,23 @@
 
 namespace od {
 
-struct EncoderConfig {
-    EncoderKind kind = EncoderKind::Auto;
-    std::string vaapiDevice = "/dev/dri/renderD128";
-    int outputWidth = 0;
-    int outputHeight = 0;
-    int fps = 60;
-    int bitrate = 18'000'000;
-};
-
 /// Low-latency FFmpeg subprocess adapter. Capture threads only replace a
 /// single pending frame, and no more than `maxFramesInFlight` frames are handed
 /// to FFmpeg at once, so a slow encoder costs dropped frames rather than a
 /// growing queue the application cannot see.
-class FfmpegEncoder {
+class FfmpegEncoder final : public Encoder {
 public:
-    using FrameCallback = std::function<void(EncodedFrame)>;
-
     FfmpegEncoder() = default;
-    ~FfmpegEncoder();
-    FfmpegEncoder(const FfmpegEncoder&) = delete;
-    FfmpegEncoder& operator=(const FfmpegEncoder&) = delete;
+    ~FfmpegEncoder() override;
 
-    void start(EncoderConfig config, FrameCallback callback);
-    void submit(CapturedFrame frame);
-    void requestKeyframe();
-    void stop();
-    [[nodiscard]] std::string selectedEncoder() const;
+    void start(EncoderConfig config, FrameCallback callback) override;
+    void submit(CapturedFrame frame) override;
+    void requestKeyframe() override;
+    void stop() override;
+    [[nodiscard]] std::string selectedEncoder() const override;
+    /// The subprocess receives frames as raw bytes over a pipe, which a GPU
+    /// buffer cannot travel through.
+    [[nodiscard]] bool acceptsDmabuf() const override { return false; }
 
 private:
     void run();

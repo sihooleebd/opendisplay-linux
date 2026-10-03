@@ -65,12 +65,6 @@ void Session::start(const Endpoint& endpoint) {
 }
 
 void Session::startPipeline(const PhoneInfo& phone) {
-    const int nativeWidth = std::max(2, phone.pixelsWide) & ~1;
-    const int nativeHeight = std::max(2, phone.pixelsHigh) & ~1;
-    const int outputWidth = std::max(2, static_cast<int>(std::lround(nativeWidth * options_.scale)))
-        & ~1;
-    const int outputHeight = std::max(2, static_cast<int>(std::lround(nativeHeight * options_.scale)))
-        & ~1;
     const auto capture = desktop_->start(DesktopRequest{
         .mode = options_.mode,
         .receiver = phone,
@@ -80,47 +74,68 @@ void Session::startPipeline(const PhoneInfo& phone) {
     });
     bool pipewireFdHandedOff = false;
     try {
-        encoder_.start(EncoderConfig{
+        // No explicit size: the encoder follows the format the compositor
+        // actually negotiates, so --scale stays a multiplier on that rather
+        // than a resample to the receiver's panel.
+        const EncoderConfig encoderConfig{
             .kind = options_.encoder,
             .vaapiDevice = options_.vaapiDevice,
-            .outputWidth = outputWidth,
-            .outputHeight = outputHeight,
+            .outputWidth = 0,
+            .outputHeight = 0,
+            .outputScale = options_.scale,
             .fps = options_.fps,
             .bitrate = options_.bitrate,
-        }, [this](EncodedFrame frame) {
+        };
+        encoder_ = makeEncoder(encoderConfig, options_.zeroCopy);
+        encoder_->start(encoderConfig, [this](EncodedFrame frame) {
             if (frame.annexB.empty() || !wire::containsAnnexBStartCode(frame.annexB)) {
                 return;
             }
-            send(wire::videoPayload(frame, wallClockMs()));
+            sendFramed(wire::videoFrame(frame, wallClockMs()));
         });
         pipewireFdHandedOff = true;
+        // Only ask the compositor for a GPU buffer when the chosen encoder can
+        // actually take one; the subprocess path needs it in system memory.
+        const bool allowDmabuf = options_.zeroCopy && encoder_->acceptsDmabuf();
         capture_.start(capture.pipewireFd, capture.stream.nodeId, capture.captureWidth,
                        capture.captureHeight, options_.fps, [this](CapturedFrame frame) {
-                           encoder_.submit(std::move(frame));
-                       });
+                           encoder_->submit(std::move(frame));
+                       }, allowDmabuf);
         pipelineRunning_ = true;
         activePhone_ = phone;
-        log("Streaming " + std::to_string(outputWidth) + 'x' + std::to_string(outputHeight)
-            + " at up to " + std::to_string(options_.fps) + " fps");
+        log("Streaming at up to " + std::to_string(options_.fps) + " fps via "
+            + encoder_->selectedEncoder()
+            + (capture_.usingDmabuf() ? ", zero copy" : ""));
     } catch (...) {
         if (!pipewireFdHandedOff) {
             ::close(capture.pipewireFd);
         }
-        encoder_.stop();
+        if (encoder_) encoder_->stop();
         desktop_->stop();
         throw;
     }
 }
 
 void Session::stopPipeline() {
+    // The encoder goes first. A zero-copy frame holds a lease on a capture
+    // buffer, and releasing it requeues that buffer on the PipeWire stream,
+    // so every frame has to be let go while the stream is still alive.
+    // submit() is already a no-op once the encoder stops, so frames arriving
+    // in between are dropped rather than queued.
+    if (encoder_) {
+        encoder_->stop();
+        encoder_.reset();
+    }
     capture_.stop();
-    encoder_.stop();
     desktop_->stop();
     pipelineRunning_ = false;
 }
 
 bool Session::send(const std::string_view payload) {
-    const auto framed = wire::frame(payload);
+    return sendFramed(wire::frame(payload));
+}
+
+bool Session::sendFramed(const std::string_view framed) {
     std::lock_guard lock(sendMutex_);
     if (!connected_.load() || !socket_.valid()) {
         return false;
@@ -185,7 +200,7 @@ void Session::receiveLoop() {
                         .y = object->value(QStringLiteral("dy")).toDouble()});
         } else if (type == QStringLiteral("kf")) {
             log("Receiver requested a keyframe");
-            encoder_.requestKeyframe();
+            if (encoder_) encoder_->requestKeyframe();
         } else if (type == QStringLiteral("stats")) {
             debug("Receiver stats: "
                   + QJsonDocument(*object).toJson(QJsonDocument::Compact).toStdString());

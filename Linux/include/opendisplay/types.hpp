@@ -1,6 +1,10 @@
 #pragma once
 
+#include "opendisplay/frame_pool.hpp"
+
+#include <array>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 
@@ -72,17 +76,60 @@ struct VideoFormat {
     PixelFormat pixelFormat = PixelFormat::Bgra;
 };
 
+struct DmabufPlane {
+    int fd = -1;
+    std::uint32_t offset = 0;
+    std::uint32_t stride = 0;
+};
+
+/// A frame the compositor left on the GPU.
+///
+/// The descriptors are borrowed, not owned: they stay valid only while the
+/// capture buffer they came from is still checked out, which is what
+/// CapturedFrame::gpuBufferLease tracks.
+struct DmabufFrame {
+    std::uint32_t drmFormat = 0;
+    std::uint64_t modifier = 0;
+    std::uint32_t planeCount = 0;
+    std::array<DmabufPlane, 4> planes{};
+};
+
 struct CapturedFrame {
     VideoFormat format;
     std::int64_t capturedAtMs = 0;
     std::uint64_t sequence = 0;
-    std::string bytes;
+    /// Pixels in system memory. Empty when the frame stayed on the GPU.
+    FrameBuffer bytes;
+    /// Set instead of `bytes` when the compositor handed over a GPU buffer.
+    std::optional<DmabufFrame> dmabuf;
+    /// Returns the capture buffer to the compositor when dropped. Held until
+    /// the GPU has finished reading the frame, so it must outlive the encode.
+    std::shared_ptr<void> gpuBufferLease;
 };
 
 struct EncodedFrame {
     std::int64_t capturedAtMs = 0;
     bool keyframe = false;
     std::string annexB;
+};
+
+struct EncoderConfig {
+    EncoderKind kind = EncoderKind::Auto;
+    std::string vaapiDevice = "/dev/dri/renderD128";
+    /// Forces an exact encode size. Left at zero, the encoder tracks whatever
+    /// the compositor actually captures, scaled by `outputScale`.
+    ///
+    /// Tracking matters: the virtual output is nudged to produce integer
+    /// logical geometry, so it rarely lands on the receiver's native pixels.
+    /// Encoding at the receiver's size instead would resample every frame to
+    /// cover a handful of pixels -- paying for a full scaling pass and
+    /// softening text -- when the receiver can cover the difference with its
+    /// own display scaler for nothing.
+    int outputWidth = 0;
+    int outputHeight = 0;
+    double outputScale = 1.0;
+    int fps = 60;
+    int bitrate = 18'000'000;
 };
 
 struct Options {
@@ -100,6 +147,9 @@ struct Options {
     double scale = 1.0;
     DisplayOptions display;
     bool input = true;
+    /// Lets capture hand the encoder a compositor GPU buffer instead of a
+    /// copy. Falls back on its own when the pieces are not available.
+    bool zeroCopy = true;
     bool listDevices = false;
     bool verbose = false;
 };

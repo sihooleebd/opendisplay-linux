@@ -9,11 +9,20 @@
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 
 namespace od {
+
+/// Shared between the capture object and any outstanding buffer lease, so a
+/// frame released after the stream is gone can tell and do nothing.
+struct CaptureStreamHandle {
+    pw_thread_loop* loop = nullptr;
+    pw_stream* stream = nullptr;
+    std::atomic_bool alive{false};
+};
 
 class PipeWireCapture {
 public:
@@ -24,8 +33,13 @@ public:
     PipeWireCapture(const PipeWireCapture&) = delete;
     PipeWireCapture& operator=(const PipeWireCapture&) = delete;
 
+    /// `allowDmabuf` offers the producer a GPU-buffer path alongside the
+    /// system-memory one. A producer that cannot share GPU buffers negotiates
+    /// system memory as before, so this is safe to leave on.
     void start(int remoteFd, std::uint32_t nodeId, int width, int height, int fps,
-               FrameCallback callback);
+               FrameCallback callback, bool allowDmabuf = true);
+    /// True once a frame has arrived as a GPU buffer rather than a copy.
+    [[nodiscard]] bool usingDmabuf() const;
     void stop();
     [[nodiscard]] std::optional<std::string> error() const;
 
@@ -38,6 +52,8 @@ public:
 
 private:
     void handleProcess();
+    void handleDmabuf(pw_buffer* pipewireBuffer);
+    void announceBufferParams();
 
     pw_thread_loop* loop_ = nullptr;
     pw_context* context_ = nullptr;
@@ -45,7 +61,11 @@ private:
     pw_stream* stream_ = nullptr;
     spa_hook listener_{};
     spa_video_info_raw format_{};
+    bool allowDmabuf_ = true;
+    bool negotiatedDmabuf_ = false;
     FrameCallback callback_;
+    std::shared_ptr<FramePool> pool_;
+    std::shared_ptr<CaptureStreamHandle> handle_;
     std::atomic<std::uint64_t> sequence_ = 0;
     mutable std::mutex stateMutex_;
     std::condition_variable stateCondition_;

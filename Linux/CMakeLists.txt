@@ -16,6 +16,9 @@ pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3)
 pkg_check_modules(AVAHI REQUIRED IMPORTED_TARGET avahi-client)
 pkg_check_modules(USBMUXD REQUIRED IMPORTED_TARGET libusbmuxd-2.0)
 pkg_check_modules(WAYLAND REQUIRED IMPORTED_TARGET wayland-client)
+pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET
+    libavcodec libavfilter libavutil)
+pkg_check_modules(LIBDRM REQUIRED IMPORTED_TARGET libdrm)
 find_program(WAYLAND_SCANNER wayland-scanner REQUIRED)
 
 set(OPENDISPLAY_BUILD_GUI AUTO CACHE STRING
@@ -44,10 +47,13 @@ set(OPENDISPLAY_CORE_SOURCES
     include/opendisplay/xdg_portal.hpp
     ${VIRTUAL_POINTER_HEADER}
     ${VIRTUAL_POINTER_CODE}
+    src/annexb.cpp
     src/desktop_backend_factory.cpp
+    src/encoder.cpp
     src/display_layout.cpp
     src/discovery.cpp
     src/ffmpeg_encoder.cpp
+    src/frame_pool.cpp
     src/kde_output_controller.cpp
     src/kde_portal.cpp
     src/hyprland_output_controller.cpp
@@ -56,6 +62,7 @@ set(OPENDISPLAY_CORE_SOURCES
     src/pipewire_format.cpp
     src/session.cpp
     src/socket.cpp
+    src/vaapi_encoder.cpp
     src/wire.cpp
     src/wayland_virtual_pointer.cpp
     src/xdg_portal.cpp
@@ -73,6 +80,8 @@ target_link_libraries(opendisplay-core PUBLIC
     PkgConfig::AVAHI
     PkgConfig::USBMUXD
     PkgConfig::WAYLAND
+    PkgConfig::LIBAV
+    PkgConfig::LIBDRM
     Threads::Threads
 )
 
@@ -180,6 +189,7 @@ if(BUILD_TESTING)
     add_executable(opendisplay-encoder-tests
         tests/encoder_tests.cpp
         src/ffmpeg_encoder.cpp
+        src/frame_pool.cpp
         src/wire.cpp
     )
     target_include_directories(opendisplay-encoder-tests PRIVATE include)
@@ -187,6 +197,35 @@ if(BUILD_TESTING)
     target_compile_options(opendisplay-encoder-tests PRIVATE -UNDEBUG)
     add_test(NAME encoder COMMAND opendisplay-encoder-tests)
     set_tests_properties(encoder PROPERTIES TIMEOUT 60)
+
+    add_executable(opendisplay-annexb-tests
+        tests/annexb_tests.cpp
+        src/annexb.cpp
+    )
+    target_include_directories(opendisplay-annexb-tests PRIVATE include)
+    target_compile_options(opendisplay-annexb-tests PRIVATE -UNDEBUG)
+    add_test(NAME annexb COMMAND opendisplay-annexb-tests)
+
+    add_executable(opendisplay-frame-pool-tests
+        tests/frame_pool_tests.cpp
+        src/frame_pool.cpp
+    )
+    target_include_directories(opendisplay-frame-pool-tests PRIVATE include)
+    target_compile_options(opendisplay-frame-pool-tests PRIVATE -UNDEBUG)
+    add_test(NAME frame-pool COMMAND opendisplay-frame-pool-tests)
+
+    add_executable(opendisplay-vaapi-encoder-tests
+        tests/vaapi_encoder_tests.cpp
+        src/annexb.cpp
+        src/frame_pool.cpp
+        src/vaapi_encoder.cpp
+    )
+    target_include_directories(opendisplay-vaapi-encoder-tests PRIVATE include)
+    target_link_libraries(opendisplay-vaapi-encoder-tests PRIVATE
+        PkgConfig::LIBAV PkgConfig::LIBDRM Threads::Threads)
+    target_compile_options(opendisplay-vaapi-encoder-tests PRIVATE -UNDEBUG)
+    add_test(NAME vaapi-encoder COMMAND opendisplay-vaapi-encoder-tests)
+    set_tests_properties(vaapi-encoder PROPERTIES TIMEOUT 60)
 
     add_executable(opendisplay-pipewire-format-tests
         tests/pipewire_format_tests.cpp

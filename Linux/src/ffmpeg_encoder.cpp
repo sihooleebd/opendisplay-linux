@@ -1,5 +1,7 @@
 #include "opendisplay/ffmpeg_encoder.hpp"
 
+#include "opendisplay/encoder.hpp"
+
 #include "opendisplay/log.hpp"
 
 #include <fcntl.h>
@@ -40,18 +42,28 @@ std::string encoderName(const EncoderKind kind) {
     return "auto";
 }
 
+/// `ffmpeg -encoders` costs a shell and an ffmpeg start, and the answer cannot
+/// change while the process runs. Probing for three encoder names, on every
+/// pipeline start, used to pay for it three times over.
+const std::string& ffmpegEncoderList() {
+    static const std::string list = [] {
+        std::array<char, 512> buffer{};
+        std::string output;
+        FILE* process = ::popen("ffmpeg -hide_banner -encoders 2>/dev/null", "r");
+        if (process == nullptr) {
+            return output;
+        }
+        while (::fgets(buffer.data(), static_cast<int>(buffer.size()), process) != nullptr) {
+            output.append(buffer.data());
+        }
+        ::pclose(process);
+        return output;
+    }();
+    return list;
+}
+
 bool ffmpegHasEncoder(const std::string_view name) {
-    std::array<char, 512> buffer{};
-    std::string output;
-    FILE* process = ::popen("ffmpeg -hide_banner -encoders 2>/dev/null", "r");
-    if (process == nullptr) {
-        return false;
-    }
-    while (::fgets(buffer.data(), static_cast<int>(buffer.size()), process) != nullptr) {
-        output.append(buffer.data());
-    }
-    ::pclose(process);
-    return output.find(name) != std::string::npos;
+    return ffmpegEncoderList().find(name) != std::string::npos;
 }
 
 bool writeAll(const int fd, const std::string_view bytes) {
@@ -174,8 +186,9 @@ EncoderKind FfmpegEncoder::chooseEncoder() const {
 }
 
 std::vector<std::string> FfmpegEncoder::arguments(const VideoFormat& input) const {
-    const int outputWidth = config_.outputWidth > 0 ? config_.outputWidth : input.width;
-    const int outputHeight = config_.outputHeight > 0 ? config_.outputHeight : input.height;
+    const auto output = encodeSizeFor(config_, input);
+    const int outputWidth = output.width;
+    const int outputHeight = output.height;
     const std::string size = std::to_string(input.width) + "x" + std::to_string(input.height);
     const std::string rate = std::to_string(std::max(1, config_.fps));
     std::vector<std::string> args{
@@ -200,6 +213,13 @@ std::vector<std::string> FfmpegEncoder::arguments(const VideoFormat& input) cons
         // async_depth=1 is load-bearing, not tidiness. The default of 2 makes
         // the encoder withhold output until a third frame arrives, which
         // deadlocks the in-flight cap above (measured: 6 fps instead of 42).
+        //
+        // low_power is deliberately absent. Gen9.5 iHD advertises
+        // VAEntrypointEncSliceLP and FFmpeg does select it, but opening the
+        // encoder then fails with EINVAL under every bitrate-targeted rate
+        // control; only -rc_mode CQP succeeds. A screen stream has a link
+        // budget to keep, so buying the low-power engine with rate control
+        // would let a busy frame overrun the transport.
         args.insert(args.end(), {
             "-vf", "hwupload,scale_vaapi=w=" + std::to_string(outputWidth)
                        + ":h=" + std::to_string(outputHeight) + ":format=nv12",
@@ -254,6 +274,11 @@ void FfmpegEncoder::startProcess(const VideoFormat& input) {
     }
     ::close(inputPipe[0]);
     ::close(outputPipe[1]);
+    // A raw frame is megabytes against a 64 KiB default pipe, so handing one
+    // over otherwise means hundreds of fill-drain round trips with FFmpeg.
+    // Enlarging is advisory: the kernel caps it at /proc/sys/fs/pipe-max-size
+    // and the write path is correct at whatever size it grants.
+    ::fcntl(inputPipe[1], F_SETPIPE_SZ, 1 << 20);
     inputFd_ = inputPipe[1];
     outputFd_ = outputPipe[0];
     childPid_ = static_cast<int>(pid);

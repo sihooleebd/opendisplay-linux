@@ -34,6 +34,38 @@ bool hasNalType(const std::string_view bytes, const unsigned char type) {
     return false;
 }
 
+/// The encode size follows the compositor's actual format unless something
+/// asks otherwise. Encoding at the receiver's panel size instead would
+/// resample every frame to cover the few pixels the virtual output was
+/// nudged by, which costs a scaling pass and softens the image.
+void tracksTheCapturedSizeUnlessOverridden() {
+    const od::VideoFormat captured{.width = 2380, .height = 1666};
+
+    const auto tracked = od::encodeSizeFor(od::EncoderConfig{}, captured);
+    assert(tracked.width == 2380);
+    assert(tracked.height == 1666);
+
+    // --scale stays a multiplier on what was captured.
+    const auto halved = od::encodeSizeFor(od::EncoderConfig{.outputScale = 0.5}, captured);
+    assert(halved.width == 1190);
+    assert(halved.height == 833 - 1);  // rounded down to stay even
+
+    // An explicit size still wins.
+    const auto forced = od::encodeSizeFor(
+        od::EncoderConfig{.outputWidth = 1280, .outputHeight = 720}, captured);
+    assert(forced.width == 1280);
+    assert(forced.height == 720);
+
+    // H.264 needs even dimensions, and nothing may collapse to zero.
+    const auto odd = od::encodeSizeFor(od::EncoderConfig{},
+                                       od::VideoFormat{.width = 1921, .height = 1081});
+    assert(odd.width == 1920);
+    assert(odd.height == 1080);
+    const auto tiny = od::encodeSizeFor(od::EncoderConfig{.outputScale = 0.001}, captured);
+    assert(tiny.width >= 2);
+    assert(tiny.height >= 2);
+}
+
 }  // namespace
 
 /// Feeding faster than the encoder drains must cost dropped frames, not a
@@ -101,6 +133,7 @@ void boundsLatencyWhenCaptureOutrunsTheEncoder() {
 }
 
 int main() {
+    tracksTheCapturedSizeUnlessOverridden();
     std::mutex mutex;
     std::condition_variable condition;
     std::vector<od::EncodedFrame> output;

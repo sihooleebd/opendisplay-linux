@@ -23,6 +23,10 @@ std::optional<PhoneInfo> parseHello(const QJsonObject& object);
 std::string welcome();
 std::string pong(double phoneTime, double hostTime);
 std::string videoPayload(const EncodedFrame& frame, std::int64_t sentAtMs);
+/// videoPayload plus the length prefix, built in one allocation. Video is the
+/// only high-rate message, and composing it in two steps copied every access
+/// unit twice on the way to the socket.
+std::string videoFrame(const EncodedFrame& frame, std::int64_t sentAtMs);
 bool containsAnnexBStartCode(std::string_view bytes);
 
 }  // namespace od::wire

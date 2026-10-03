@@ -202,6 +202,10 @@ int main(int argc, char* argv[]) {
         "Receiver panel dimensions for physical-DPI auto scaling.", "WIDTHxHEIGHT");
     const QCommandLineOption noInputOption("no-input", "Do not request pointer control.");
     const QCommandLineOption listOption({"l", "list"}, "List visible Wi-Fi and USB receivers.");
+    const QCommandLineOption noZeroCopyOption(
+        "no-zero-copy",
+        "Copy frames through system memory instead of sharing the compositor's "
+        "GPU buffer with the encoder.");
     const QCommandLineOption verboseOption("verbose", "Enable diagnostic logging.");
     parser.addOptions({transportOption, hostOption, portOption, serviceOption, udidOption,
                        modeOption, encoderOption, compositorOption, vaapiOption, fpsOption, bitrateOption,
@@ -209,7 +213,7 @@ int main(int argc, char* argv[]) {
                        virtualResolutionOption, displayScaleOption, virtualRefreshOption,
                        referenceGeometryOption, referenceResolutionOption,
                        referenceScaleOption, referenceSizeOption, receiverSizeOption,
-                       noInputOption, listOption, verboseOption});
+                       noInputOption, listOption, noZeroCopyOption, verboseOption});
     parser.process(application);
 
     try {
@@ -275,6 +279,7 @@ int main(int argc, char* argv[]) {
                 parser.value(receiverSizeOption), "--ipad-size-mm");
         }
         options.input = !parser.isSet(noInputOption);
+        options.zeroCopy = !parser.isSet(noZeroCopyOption);
         options.listDevices = parser.isSet(listOption);
         options.verbose = parser.isSet(verboseOption);
         od::verboseLogging = options.verbose;
