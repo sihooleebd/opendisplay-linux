@@ -182,6 +182,8 @@ void KdePortal::notify(const QString& method, const QVariantList& arguments) {
     portal_.callNoReply(remoteDesktopInterface, method, full);
 }
 
+void KdePortal::cancel() { portal_.cancel(); }
+
 void KdePortal::pointer(const std::string_view phase, const double normalizedX,
                         const double normalizedY) {
     const double x = std::clamp(normalizedX, 0.0, 1.0) * stream_.logicalWidth;

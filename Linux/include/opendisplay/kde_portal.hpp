@@ -25,6 +25,7 @@ public:
 
     PortalCapture start(const DesktopRequest& request) override;
     void stop() override;
+    void cancel() override;
     void pointer(std::string_view phase, double normalizedX, double normalizedY) override;
     void scroll(double dx, double dy) override;
 

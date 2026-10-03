@@ -2,8 +2,8 @@
 
 #include "opendisplay/log.hpp"
 
-#include <QCoreApplication>
 #include <QDBusObjectPath>
+#include <QSettings>
 #include <QVariant>
 
 #include <algorithm>
@@ -15,6 +15,12 @@ namespace od {
 namespace {
 
 constexpr auto screenCastInterface = "org.freedesktop.portal.ScreenCast";
+
+/// Restore tokens are per-source, so they are keyed by the output the session
+/// captures. The virtual output keeps a fixed name for exactly this reason.
+QString restoreTokenKey(const std::string& outputName) {
+    return QStringLiteral("portal/restoreToken/") + QString::fromStdString(outputName);
+}
 
 }  // namespace
 
@@ -55,8 +61,10 @@ PortalCapture HyprlandPortal::start(const DesktopRequest& request) {
                       + std::to_string(layout.resolution.width) + 'x'
                       + std::to_string(layout.resolution.height));
             }
-            virtualOutputName_ = "OpenDisplay-"
-                + std::to_string(QCoreApplication::applicationPid());
+            // Fixed, not PID-suffixed: the portal's restore token is keyed to
+            // the output name, so a name that changed every run would make the
+            // stored permission useless and re-open the chooser every time.
+            virtualOutputName_ = "OpenDisplay";
             outputCreated_ = true;
             referencePinned_ = true;
             const auto configured = outputs_.create(virtualOutputName_, layout, reference);
@@ -79,13 +87,19 @@ PortalCapture HyprlandPortal::start(const DesktopRequest& request) {
             captureLogicalHeight = reference.logicalGeometry.height;
         }
 
-        // Hot-plugging a headless output can make it Hyprland's active monitor.
-        // Restore both monitor focus and cursor placement before XDPH creates
-        // its chooser, otherwise the authorization UI can appear on the output
-        // that is not capturable until the chooser is accepted.
-        outputs_.focus(reference.name);
-        log("Reference monitor focused; opening the share chooser on " + reference.name
-            + "…");
+        // Hot-plugging a headless output can make it Hyprland's active monitor,
+        // and new windows follow focus — which is how the chooser ends up on
+        // the virtual display nobody can see. Put it where the pointer is, and
+        // fall back to the reference monitor when the pointer sits on the
+        // virtual output or Hyprland cannot say.
+        std::string chooserOutput = reference.name;
+        if (const auto atCursor = outputs_.outputAtCursor();
+            atCursor && atCursor->name != virtualOutputName_) {
+            chooserOutput = atCursor->name;
+        }
+        chooserPinned_ = outputs_.pinChooserTo(chooserOutput);
+        outputs_.focus(chooserOutput);
+        log("Opening the share chooser on " + chooserOutput + "…");
 
         const auto availableSources = portal_.property(screenCastInterface,
                                                        "AvailableSourceTypes");
@@ -95,6 +109,16 @@ PortalCapture HyprlandPortal::start(const DesktopRequest& request) {
         }
         const auto availableCursorModes = portal_.property(screenCastInterface,
                                                            "AvailableCursorModes");
+        // The portal deliberately offers no way to pick a source for the user;
+        // consent is the chooser's whole purpose. Reusing an earlier consent
+        // through a restore token is the sanctioned alternative, so the chooser
+        // only has to be answered once per output. It needs ScreenCast v4+.
+        const auto portalVersion = portal_.property(screenCastInterface, "version");
+        const bool canPersist = portalVersion.isValid() && portalVersion.toUInt() >= 4;
+        const auto tokenKey = restoreTokenKey(request.mode == CaptureMode::Extend
+                                                  ? virtualOutputName_ : reference.name);
+        QSettings settings(QStringLiteral("OpenDisplay"), QStringLiteral("OpenDisplay"));
+
         log("Requesting a Hyprland screen-cast portal session…");
         sessionPath_ = portal_.createSession(screenCastInterface);
 
@@ -104,15 +128,39 @@ PortalCapture HyprlandPortal::start(const DesktopRequest& request) {
         const bool canEmbedCursor = !availableCursorModes.isValid()
             || (availableCursorModes.toUInt() & 2U) != 0;
         sourceOptions.insert(QStringLiteral("cursor_mode"), canEmbedCursor ? 2U : 1U);
+        if (canPersist) {
+            sourceOptions.insert(QStringLiteral("persist_mode"), 2U);  // until revoked
+            const auto savedToken = settings.value(tokenKey).toString();
+            if (!savedToken.isEmpty()) {
+                sourceOptions.insert(QStringLiteral("restore_token"), savedToken);
+                log("Reusing the stored screen-cast permission; the chooser should stay "
+                    "closed.");
+            }
+        } else {
+            debug("Portal ScreenCast is older than v4; the chooser cannot be skipped");
+        }
         portal_.request(screenCastInterface, QStringLiteral("SelectSources"),
                         {QVariant::fromValue(QDBusObjectPath(sessionPath_))},
                         std::move(sourceOptions));
-        // XDPH normally launches its picker from Start. Reassert focus here in
-        // case creating the portal session changed the active surface.
-        outputs_.focus(reference.name);
+        // XDPH opens its picker from SelectSources, so by here the choice is
+        // already made. Reassert focus for the Start request, which can still
+        // raise a dialog when the stored permission is refused.
+        outputs_.focus(chooserOutput);
         const auto started = portal_.request(
             screenCastInterface, QStringLiteral("Start"),
             {QVariant::fromValue(QDBusObjectPath(sessionPath_)), QString()}, {});
+        if (canPersist) {
+            // The portal issues a fresh token per use, so write back whatever
+            // Start returned and forget ours when it declined to persist.
+            const auto renewed = XdgPortal::unwrap(
+                started.value(QStringLiteral("restore_token"))).toString();
+            if (renewed.isEmpty()) {
+                settings.remove(tokenKey);
+                debug("Portal did not persist the screen-cast permission");
+            } else {
+                settings.setValue(tokenKey, renewed);
+            }
+        }
         const auto parsed = XdgPortal::firstStream(
             started.value(QStringLiteral("streams")),
             std::max(1, captureWidth), std::max(1, captureHeight));
@@ -163,7 +211,7 @@ void HyprlandPortal::stop() {
     }
     outputCreated_ = false;
     virtualOutputName_.clear();
-    if (referencePinned_) {
+    if (referencePinned_ || chooserPinned_) {
         try {
             outputs_.reload();
             debug("Reloaded Hyprland configuration after removing temporary monitor rules");
@@ -172,7 +220,10 @@ void HyprlandPortal::stop() {
         }
     }
     referencePinned_ = false;
+    chooserPinned_ = false;
 }
+
+void HyprlandPortal::cancel() { portal_.cancel(); }
 
 void HyprlandPortal::pointer(const std::string_view phase, const double normalizedX,
                              const double normalizedY) {

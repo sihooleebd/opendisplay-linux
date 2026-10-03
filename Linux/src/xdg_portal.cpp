@@ -9,6 +9,7 @@
 #include <QDBusUnixFileDescriptor>
 #include <QDBusVariant>
 #include <QEventLoop>
+#include <QPointer>
 #include <QRandomGenerator>
 #include <QTimer>
 
@@ -61,6 +62,7 @@ QVariantMap XdgPortal::request(const QString& interface, const QString& method,
     }
 
     waiting_ = true;
+    cancelled_ = false;
     responseCode_ = 2;
     responseResults_.clear();
 
@@ -77,21 +79,33 @@ QVariantMap XdgPortal::request(const QString& interface, const QString& method,
                                      .toStdString());
     }
 
+    // The portal hands its authorization dialog to the compositor, so the only
+    // way to stay responsive is to run a nested event loop. That loop also
+    // delivers queued calls to this thread, any of which may destroy the portal
+    // owner, so nothing below may touch a member before the guard is checked.
     QEventLoop loop;
     QTimer timeout;
     timeout.setSingleShot(true);
     connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+    connect(this, &XdgPortal::requestFinished, &loop, &QEventLoop::quit);
     connect(this, &QObject::destroyed, &loop, &QEventLoop::quit);
-    QTimer poll;
-    connect(&poll, &QTimer::timeout, &loop, [&] {
-        if (!waiting_) loop.quit();
-    });
     timeout.start(300'000);
-    poll.start(10);
+
+    const QPointer<XdgPortal> alive(this);
     loop.exec();
+    if (alive.isNull()) {
+        // Destroyed while the loop ran. Every member, bus_ included, is gone;
+        // writing waiting_ or disconnecting through bus_ here would scribble on
+        // freed memory and only abort much later, inside an unrelated malloc.
+        throw std::runtime_error("the portal request was abandoned");
+    }
+
     waiting_ = false;
     bus_.disconnect(portalService, expectedPath, requestInterface, QStringLiteral("Response"),
                     this, SLOT(requestResponse(uint,QVariantMap)));
+    if (cancelled_) {
+        throw std::runtime_error("portal request cancelled");
+    }
     if (!timeout.isActive()) {
         throw std::runtime_error("portal request timed out");
     }
@@ -100,6 +114,13 @@ QVariantMap XdgPortal::request(const QString& interface, const QString& method,
                                                     : "portal request denied");
     }
     return responseResults_;
+}
+
+void XdgPortal::cancel() {
+    if (!waiting_) return;
+    cancelled_ = true;
+    waiting_ = false;
+    emit requestFinished();
 }
 
 QString XdgPortal::createSession(const QString& interface) {
@@ -156,9 +177,11 @@ QVariant XdgPortal::property(const QString& interface, const char* name) const {
 }
 
 void XdgPortal::requestResponse(const uint response, const QVariantMap& results) {
+    if (!waiting_) return;
     responseCode_ = response;
     responseResults_ = results;
     waiting_ = false;
+    emit requestFinished();
 }
 
 QVariant XdgPortal::unwrap(QVariant value) {

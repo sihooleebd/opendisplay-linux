@@ -251,6 +251,10 @@ bool Session::tick() {
     return connected_.load();
 }
 
+void Session::cancel() {
+    if (desktop_) desktop_->cancel();
+}
+
 void Session::stop() {
     stopPipeline();
     connected_.store(false);

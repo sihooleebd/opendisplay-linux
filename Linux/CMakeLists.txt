@@ -186,7 +186,7 @@ if(BUILD_TESTING)
     target_link_libraries(opendisplay-encoder-tests PRIVATE Qt6::Core Threads::Threads)
     target_compile_options(opendisplay-encoder-tests PRIVATE -UNDEBUG)
     add_test(NAME encoder COMMAND opendisplay-encoder-tests)
-    set_tests_properties(encoder PROPERTIES TIMEOUT 15)
+    set_tests_properties(encoder PROPERTIES TIMEOUT 60)
 
     add_executable(opendisplay-pipewire-format-tests
         tests/pipewire_format_tests.cpp

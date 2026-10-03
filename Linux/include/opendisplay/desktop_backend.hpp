@@ -37,6 +37,9 @@ public:
     virtual ~DesktopBackend() = default;
     virtual PortalCapture start(const DesktopRequest& request) = 0;
     virtual void stop() = 0;
+    /// Abandons an authorization request that start() is still waiting on, so
+    /// start() unwinds instead of being torn down from under its own stack.
+    virtual void cancel() {}
     virtual void pointer(std::string_view phase, double normalizedX, double normalizedY) = 0;
     virtual void scroll(double dx, double dy) = 0;
 };

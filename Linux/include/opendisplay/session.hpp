@@ -29,6 +29,9 @@ public:
     /// Called by the Qt main loop. Returns false after disconnection.
     bool tick();
     void stop();
+    /// Abandons a pending portal authorization so a start() still on the stack
+    /// unwinds on its own. Must be called from the thread that called start().
+    void cancel();
 
 private:
     enum class EventKind { Hello, Touch, Scroll };

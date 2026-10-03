@@ -166,6 +166,21 @@ std::string hyprlandFocusExpression(const std::string& outputName) {
     return "hl.dispatch(hl.dsp.focus({ monitor = \"" + outputName + "\" }))";
 }
 
+std::string hyprlandChooserRuleExpression(const std::string& outputName) {
+    return "hl.window_rule({ match = { title = \"^(" + std::string(hyprlandChooserTitle)
+        + ")$\" }, monitor = \"" + outputName + "\" })";
+}
+
+std::optional<DisplayOutput> outputContainingPoint(const std::vector<DisplayOutput>& outputs,
+                                                   const int x, const int y) {
+    const auto found = std::find_if(outputs.begin(), outputs.end(), [&](const auto& output) {
+        const auto& geometry = output.logicalGeometry;
+        return output.enabled && x >= geometry.x && x < geometry.x + geometry.width
+            && y >= geometry.y && y < geometry.y + geometry.height;
+    });
+    return found == outputs.end() ? std::nullopt : std::optional(*found);
+}
+
 std::vector<DisplayOutput> HyprlandOutputController::outputs() const {
     const auto result = hyprctl({QStringLiteral("-j"), QStringLiteral("monitors"),
                                  QStringLiteral("all")});
@@ -180,7 +195,11 @@ DisplayOutput HyprlandOutputController::create(const std::string& outputName,
                                                const DisplayLayout& layout,
                                                const DisplayOutput& detectedReference) const {
     if (findOutput(outputs(), outputName)) {
-        throw std::runtime_error("Hyprland output '" + outputName + "' already exists");
+        // The name is this application's by construction and no longer carries
+        // a PID, so an existing one is a leftover from a run that died before
+        // its teardown. Reclaim it instead of refusing to start.
+        debug("Reclaiming leftover Hyprland output '" + outputName + "'");
+        remove(outputName);
     }
 
     auto installRule = [&](const std::string& name, const DisplayLayout& ruleLayout,
@@ -324,6 +343,43 @@ void HyprlandOutputController::focus(const std::string& outputName) const {
         "Hyprland accepted the focus request for reference monitor '" + outputName
         + "' but still reports another monitor as focused; refusing to open an inaccessible "
           "share chooser");
+}
+
+bool HyprlandOutputController::pinChooserTo(const std::string& outputName) const {
+    // Creating the headless output makes it Hyprland's focused monitor, and
+    // new windows follow focus — which is how the chooser ends up on the
+    // display the user cannot see. An explicit monitor rule beats focus.
+    const auto result = hyprctl({
+        QStringLiteral("eval"),
+        QString::fromStdString(hyprlandChooserRuleExpression(outputName)),
+    });
+    if (!hyprlandCommandResponseAccepted(result.success, result.output)) {
+        // Placement is a convenience; a compositor that rejects the rule still
+        // gets the focus call below, so this must not fail the session.
+        debug("Hyprland rejected the share-chooser monitor rule for " + outputName + ": "
+              + (result.output.empty() ? std::string("<empty>") : result.output));
+        return false;
+    }
+    debug("Pinned the share chooser to " + outputName + " through Lua hl.window_rule");
+    return true;
+}
+
+std::optional<DisplayOutput> HyprlandOutputController::outputAtCursor() const {
+    const auto result = hyprctl({QStringLiteral("-j"), QStringLiteral("cursorpos")});
+    if (!result.success) {
+        debug("Cannot read the Hyprland cursor position: " + result.output);
+        return std::nullopt;
+    }
+    QJsonParseError error;
+    const auto document = QJsonDocument::fromJson(
+        QByteArray::fromStdString(result.output), &error);
+    if (error.error != QJsonParseError::NoError || !document.isObject()) {
+        debug("hyprctl returned invalid cursorpos JSON: " + error.errorString().toStdString());
+        return std::nullopt;
+    }
+    const auto object = document.object();
+    return outputContainingPoint(outputs(), object.value(QStringLiteral("x")).toInt(),
+                                 object.value(QStringLiteral("y")).toInt());
 }
 
 void HyprlandOutputController::remove(const std::string& outputName) const {

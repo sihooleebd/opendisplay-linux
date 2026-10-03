@@ -20,6 +20,9 @@ public:
 
     QVariantMap request(const QString& interface, const QString& method,
                         const QVariantList& arguments, QVariantMap options);
+    /// Abandons a request that is still waiting on the user. Safe to call from
+    /// a slot delivered inside request()'s own nested event loop.
+    void cancel();
     QString createSession(const QString& interface);
     int openPipeWireRemote(const QString& sessionPath);
     void closeSession(const QString& sessionPath);
@@ -32,12 +35,17 @@ public:
                                                    int fallbackWidth,
                                                    int fallbackHeight);
 
+signals:
+    /// Emitted once a pending request has a verdict, including cancellation.
+    void requestFinished();
+
 private slots:
     void requestResponse(uint response, const QVariantMap& results);
 
 private:
     QDBusConnection bus_;
     bool waiting_ = false;
+    bool cancelled_ = false;
     uint responseCode_ = 2;
     QVariantMap responseResults_;
 };

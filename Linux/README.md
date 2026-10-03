@@ -136,14 +136,18 @@ outputs.
 
 On Hyprland, OpenDisplay creates a named headless output with `hyprctl`, applies
 the same resolution, scaling, and placement calculation, and asks the
-ScreenCast portal to capture a monitor. Select the displayed `OpenDisplay-PID`
-monitor in the share picker. Touch input uses Hyprland's
+ScreenCast portal to capture a monitor. Select the displayed `OpenDisplay`
+monitor in the share picker; OpenDisplay asks the portal to remember that
+choice with a restore token, so the picker only has to be answered once per
+captured output. Touch input uses Hyprland's
 `zwlr_virtual_pointer_manager_v1` support and does not require the unsupported
 RemoteDesktop portal. Current Hyprland Lua monitor rules are used first, with
 the pre-0.55 `keyword monitor` command as a compatibility fallback. The
 headless output is removed when the session stops. Before XDPH opens its share
-picker, OpenDisplay restores focus and cursor placement to the selected
-reference monitor so the authorization prompt remains reachable. The reference
+picker, OpenDisplay pins it with a Hyprland window rule to the output the
+pointer is on — falling back to the reference monitor when the pointer sits on
+the virtual display — and focuses that output, so the authorization prompt
+never opens on a screen nobody can see. The reference
 output is temporarily pinned to its detected geometry while the headless output
 exists, preventing Hyprland `auto` rules from reversing their relative order;
 the user's configuration is reloaded after teardown.

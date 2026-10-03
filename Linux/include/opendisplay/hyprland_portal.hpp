@@ -21,6 +21,7 @@ public:
 
     PortalCapture start(const DesktopRequest& request) override;
     void stop() override;
+    void cancel() override;
     void pointer(std::string_view phase, double normalizedX, double normalizedY) override;
     void scroll(double dx, double dy) override;
 
@@ -32,6 +33,7 @@ private:
     std::string virtualOutputName_;
     bool outputCreated_ = false;
     bool referencePinned_ = false;
+    bool chooserPinned_ = false;
     bool inputEnabled_ = false;
 };
 

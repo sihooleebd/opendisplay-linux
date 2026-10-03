@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <cstring>
@@ -69,6 +70,14 @@ bool writeAll(const int fd, const std::string_view bytes) {
         offset += static_cast<std::size_t>(count);
     }
     return true;
+}
+
+/// How long the writer waits for FFmpeg to return an access unit before
+/// feeding it anyway. Three frame intervals is long enough that a healthy
+/// encoder never hits it, and short enough that a buffering one costs latency
+/// rather than a stalled stream.
+std::chrono::milliseconds flowControlTimeout(const int fps) {
+    return std::chrono::milliseconds(std::max(50, 3 * 1000 / std::max(1, fps)));
 }
 
 std::size_t startCodeLength(const std::string_view bytes, const std::size_t position) {
@@ -183,7 +192,19 @@ std::vector<std::string> FfmpegEncoder::arguments(const VideoFormat& input) cons
     const std::string scale = "scale=" + std::to_string(outputWidth) + ':'
         + std::to_string(outputHeight) + ":flags=fast_bilinear";
     if (selected_ == EncoderKind::Vaapi) {
-        args.insert(args.end(), {"-vf", scale + ",format=nv12,hwupload", "-c:v", "h264_vaapi"});
+        // Upload first, then resize and convert on the GPU. Doing either on the
+        // CPU costs more than the encode itself: measured on Intel iHD at
+        // 2388x1668, CPU BGRA->NV12 alone caps the pipeline at ~45 fps while
+        // the GPU path reaches ~59 fps.
+        //
+        // async_depth=1 is load-bearing, not tidiness. The default of 2 makes
+        // the encoder withhold output until a third frame arrives, which
+        // deadlocks the in-flight cap above (measured: 6 fps instead of 42).
+        args.insert(args.end(), {
+            "-vf", "hwupload,scale_vaapi=w=" + std::to_string(outputWidth)
+                       + ":h=" + std::to_string(outputHeight) + ":format=nv12",
+            "-c:v", "h264_vaapi", "-async_depth", "1",
+        });
     } else if (selected_ == EncoderKind::Nvenc) {
         args.insert(args.end(), {"-vf", scale, "-c:v", "h264_nvenc", "-preset", "p1",
                                  "-tune", "ull", "-delay", "0"});
@@ -258,7 +279,9 @@ void FfmpegEncoder::stopProcess() {
     {
         std::lock_guard lock(mutex_);
         timestamps_.clear();
+        inFlight_ = 0;
     }
+    condition_.notify_one();
 }
 
 void FfmpegEncoder::run() {
@@ -271,6 +294,21 @@ void FfmpegEncoder::run() {
                 condition_.wait(lock, [&] { return !running_ || pending_.has_value(); });
                 if (!running_) {
                     break;
+                }
+                // Hold back while FFmpeg still owes us access units. Capture
+                // keeps replacing pending_ meanwhile, so waiting here costs the
+                // stale frames rather than the queue depth that turns a slow
+                // encoder into hundreds of milliseconds of latency.
+                if (inFlight_ >= maxFramesInFlight) {
+                    // Bounded: an encoder that buffers more frames than the cap
+                    // would otherwise deadlock the pipeline outright, so fall
+                    // back to feeding it rather than stalling.
+                    condition_.wait_for(lock, flowControlTimeout(config_.fps), [&] {
+                        return !running_ || inFlight_ < maxFramesInFlight;
+                    });
+                    if (!running_) {
+                        break;
+                    }
                 }
                 frame = std::move(*pending_);
                 pending_.reset();
@@ -290,6 +328,7 @@ void FfmpegEncoder::run() {
             {
                 std::lock_guard lock(mutex_);
                 timestamps_.push_back(frame.capturedAtMs);
+                ++inFlight_;
             }
             if (!writeAll(inputFd_, frame.bytes)) {
                 log("FFmpeg stopped accepting frames; restarting it");
@@ -298,6 +337,7 @@ void FfmpegEncoder::run() {
                 {
                     std::lock_guard lock(mutex_);
                     timestamps_.push_back(frame.capturedAtMs);
+                    ++inFlight_;
                 }
                 if (!writeAll(inputFd_, frame.bytes)) {
                     throw std::runtime_error("FFmpeg encoder pipe failed");
@@ -381,7 +421,12 @@ void FfmpegEncoder::emitAccessUnit(std::string accessUnit) {
             timestamp = timestamps_.front();
             timestamps_.pop_front();
         }
+        // Headers can arrive as their own access unit, so never go negative.
+        if (inFlight_ > 0) {
+            --inFlight_;
+        }
     }
+    condition_.notify_one();
     bool keyframe = false;
     for (std::size_t position = findStartCode(accessUnit, 0); position != std::string::npos;) {
         const auto prefix = startCodeLength(accessUnit, position);

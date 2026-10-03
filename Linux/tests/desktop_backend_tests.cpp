@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cmath>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -77,6 +78,33 @@ void producesCurrentHyprlandFocusExpression() {
            == "hl.dispatch(hl.dsp.focus({ monitor = \"eDP-1\" }))");
 }
 
+void pinsShareChooserByTitleBecauseItHasNoAppId() {
+    assert(od::hyprlandChooserRuleExpression("eDP-1")
+           == "hl.window_rule({ match = { title = \"^(Select what to share)$\" }, "
+              "monitor = \"eDP-1\" })");
+}
+
+void mapsCursorPositionToTheOutputUnderIt() {
+    std::vector<od::DisplayOutput> outputs(2);
+    outputs[0].name = "eDP-1";
+    outputs[0].enabled = true;
+    outputs[0].logicalGeometry = {.x = 0, .y = 0, .width = 2400, .height = 1350};
+    outputs[1].name = "OpenDisplay";
+    outputs[1].enabled = true;
+    outputs[1].logicalGeometry = {.x = 2400, .y = 0, .width = 1194, .height = 834};
+
+    const auto onReference = od::outputContainingPoint(outputs, 2399, 540);
+    assert(onReference && onReference->name == "eDP-1");
+    // The edge belongs to the neighbour, not to both.
+    const auto onVirtual = od::outputContainingPoint(outputs, 2400, 100);
+    assert(onVirtual && onVirtual->name == "OpenDisplay");
+    assert(!od::outputContainingPoint(outputs, 5000, 100));
+
+    // A disabled output never claims the pointer.
+    outputs[1].enabled = false;
+    assert(!od::outputContainingPoint(outputs, 2400, 100));
+}
+
 }  // namespace
 
 int main() {
@@ -86,4 +114,6 @@ int main() {
     preservesReferenceTransformInMonitorExpression();
     rejectsSemanticHyprctlErrorsWithZeroExitStatus();
     producesCurrentHyprlandFocusExpression();
+    pinsShareChooserByTitleBecauseItHasNoAppId();
+    mapsCursorPositionToTheOutputUnderIt();
 }
