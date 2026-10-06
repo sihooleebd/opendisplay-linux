@@ -40,6 +40,7 @@ public:
     Q_INVOKABLE void connectLast();
     Q_INVOKABLE void disconnectDevice();
     Q_INVOKABLE void quit();
+    void showWindow() { emit showWindowRequested(); }
 
 signals:
     void stateChanged();

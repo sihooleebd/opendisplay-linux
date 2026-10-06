@@ -258,7 +258,7 @@ void GuiController::applyWorkerState(const QString& status, const QString& detai
 
 void GuiController::createTray() {
     tray_ = new QSystemTrayIcon(this);
-    QIcon trayIcon = QIcon::fromTheme(QStringLiteral("video-display"));
+    QIcon trayIcon = QApplication::windowIcon();
     if (trayIcon.isNull()) {
         trayIcon = QApplication::style()->standardIcon(QStyle::SP_ComputerIcon);
     }
